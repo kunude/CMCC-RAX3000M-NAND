@@ -26,3 +26,22 @@ git clone https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/
 # 移除 openwrt feeds 过时的luci版本
 rm -rf feeds/luci/applications/luci-app-passwall
 git clone https://github.com/Openwrt-Passwall/openwrt-passwall package/passwall-luci
+
+# ========== 修复 sing-box 编译：锁定 go-json-experiment/json 兼容版本 ==========
+SING_BOX_MK="package/passwall-packages/sing-box/Makefile"
+if [ -f "$SING_BOX_MK" ]; then
+    # 如果 sing-box Makefile 里没有自定义 Build/Prepare，就追加一个
+    if ! grep -q "define Build/Prepare" "$SING_BOX_MK"; then
+        cat >> "$SING_BOX_MK" << 'EOF'
+
+define Build/Prepare
+	$(Build/Prepare/Default)
+	( cd $(PKG_BUILD_DIR) && \
+	  sed -i 's|github.com/go-json-experiment/json v0.0.0-.*|github.com/go-json-experiment/json v0.0.0-20250113025959-68c5390da787|g' go.mod && \
+	  rm -f go.sum && \
+	  $(GO) mod tidy )
+endef
+EOF
+    fi
+fi
+# ============================================================================
