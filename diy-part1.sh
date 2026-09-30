@@ -19,5 +19,5 @@ git clone https://github.com/Openwrt-Passwall/openwrt-passwall package/passwall-
 git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall package/openwrt-passwall
 git clone --depth=1 https://github.com/Openwrt-Passwall/openwrt-passwall2 package/openwrt-passwall2
 
-echo 'https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/aarch64_cortex-a53/passwall_luci/packages.adb' >>./package/system/opkg/files/customfeeds.conf
-echo 'https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/aarch64_cortex-a53/passwall_packages/packages.adb' >>./package/system/opkg/files/customfeeds.conf
+# echo 'https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/aarch64_cortex-a53/passwall_luci/packages.adb' >>./package/system/opkg/files/customfeeds.conf
+# echo 'https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/aarch64_cortex-a53/passwall_packages/packages.adb' >>./package/system/opkg/files/customfeeds.conf
