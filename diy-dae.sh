@@ -85,6 +85,29 @@ fi
 sed -n '/^PKG_VERSION:=/p;/^PKG_HASH:=/p' "${DAE_MK}"
 
 # ------------------------------------------------- 3) 内核 BTF + 包选择注入
+#
+# 为什么还要显式写 KERNEL_XDP_SOCKETS 和那几个 kmod——这是踩过的坑：
+#
+#   dae 的 DEPENDS 是
+#     $(GO_ARCH_DEPENDS) $(BPF_DEPENDS) +ca-bundle +kmod-sched-core \
+#     +kmod-sched-bpf +kmod-xdp-sockets-diag +kmod-veth
+#   其中 kmod-xdp-sockets-diag 自己在 netsupport.mk 里写着
+#     DEPENDS:=@KERNEL_XDP_SOCKETS
+#
+#   scripts/package-metadata.pl 的 mconf_depends() 对每个 `+dep` 会把该包的
+#   `depends on` 重新发到本包上（源码注释：Menuconfig will not treat
+#   'select FOO' as a real dependency，所以把 FOO 的 depends 也搬过来）。
+#   于是 PACKAGE_dae 实际带上了 `depends on KERNEL_XDP_SOCKETS`。
+#
+#   而 config/passwall2.config 里是 `# CONFIG_KERNEL_XDP_SOCKETS is not set`
+#   （passwall 不需要 BTF，当年这么写没问题）。kconfig 的规则是：
+#   符号不可见时，.config 里的用户值被忽略；于是 PACKAGE_dae 整块隐形，
+#   `CONFIG_PACKAGE_dae=y` 被 defconfig 静默丢弃，而且不给任何报错。
+#   现象就是：BTF 那些符号全 OK，只有 dae / dae-geoip / dae-geosite 消失。
+#
+#   KERNEL_XDP_SOCKETS 默认值是 `default y if KERNEL_DEBUG_INFO_BTF`，
+#   本来开了 BTF 就该是 y，只是被 config 里那行显式的 not set 压住了。
+#   这里显式写 y，同时把 4 个 kmod 依赖也钉上，不再依赖 select 传递。
 cat >> .config <<EOF
 
 # ===== 以下由 diy-dae.sh 注入（dae ${DAE_VER} 需要 eBPF CO-RE / BTF）=====
@@ -93,12 +116,20 @@ CONFIG_KERNEL_DEBUG_INFO=y
 CONFIG_KERNEL_DEBUG_INFO_BTF=y
 CONFIG_KERNEL_BPF_EVENTS=y
 CONFIG_DWARVES=y
+# dae 的 kmod-xdp-sockets-diag 依赖它；不显式打开会让 PACKAGE_dae 直接隐形
+CONFIG_KERNEL_XDP_SOCKETS=y
 CONFIG_PACKAGE_dae=y
 CONFIG_PACKAGE_dae-geoip=y
 CONFIG_PACKAGE_dae-geosite=y
+# dae 的其余运行期依赖，显式钉住，避免依赖 kconfig 的 select 传递
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
+CONFIG_PACKAGE_kmod-veth=y
 # ===== 注入结束 =====
 EOF
 
 echo "--- .config 末尾注入内容 ---"
-tail -n 14 .config
+tail -n 20 .config
 echo "=== [diy-dae] 完成 ==="

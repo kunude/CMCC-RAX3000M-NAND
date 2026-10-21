@@ -172,11 +172,31 @@ jobs:
         check "CONFIG_KERNEL_DEBUG_INFO_BTF=y"
         check "CONFIG_KERNEL_BPF_EVENTS=y"
         check "CONFIG_DWARVES=y"
+        # dae 的 kmod-xdp-sockets-diag 写着 DEPENDS:=@KERNEL_XDP_SOCKETS，
+        # 这个 depends 会被 metadata.pl 搬到 PACKAGE_dae 上；它为 n 时
+        # PACKAGE_dae 直接隐形，.config 里的 =y 会被 defconfig 静默丢弃。
+        check "CONFIG_KERNEL_XDP_SOCKETS=y"
         if grep -qx "# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set" .config; then
           echo "  OK   CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set"
         else
           echo "::error::CONFIG_KERNEL_DEBUG_INFO_REDUCED 仍然是开启状态，BTF 会被依赖关系关掉"
           fail=1
+        fi
+
+        # 失败时把判定依据打出来，省得再猜「为什么 =y 没生效」。
+        if ! grep -qx "CONFIG_PACKAGE_dae=y" .config; then
+          echo "::group::dae 符号诊断"
+          echo "-- 实际值 --"
+          grep -nE "^#? ?CONFIG_(PACKAGE_dae|KERNEL_XDP_SOCKETS|HAS_BPF_TOOLCHAIN|BPF_TOOLCHAIN_NONE)" .config || true
+          echo "-- package/feeds/packages/dae 是否存在 --"
+          ls -ld package/feeds/packages/dae 2>&1 || true
+          echo "-- tmp/.config-package.in 里的 PACKAGE_dae 定义 --"
+          if [ -f tmp/.config-package.in ]; then
+            grep -n -A 16 "^config PACKAGE_dae$" tmp/.config-package.in || echo "(没找到该符号)"
+          else
+            echo "(tmp/.config-package.in 不存在)"
+          fi
+          echo "::endgroup::"
         fi
 
         echo "== 建议项（缺了只告警） =="

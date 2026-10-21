@@ -55,13 +55,45 @@ CONFIG_KERNEL_DEBUG_INFO=y
 CONFIG_KERNEL_DEBUG_INFO_BTF=y
 CONFIG_KERNEL_BPF_EVENTS=y
 CONFIG_DWARVES=y
+CONFIG_KERNEL_XDP_SOCKETS=y                     ← 见下节，缺了 dae 会整块消失
 CONFIG_PACKAGE_dae=y
 CONFIG_PACKAGE_dae-geoip=y
 CONFIG_PACKAGE_dae-geosite=y
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_kmod-sched-bpf=y
+CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
+CONFIG_PACKAGE_kmod-veth=y
 ```
 
 workflow 在 `make defconfig` 之后会逐项核对上面这些符号，缺一项就以 `::error::` 失败，
 不会白跑三个小时的编译。
+
+### 为什么 `.config` 里明明写了 `dae=y`，defconfig 之后却没了
+
+这是实际踩过的坑，链子比较长，记下来免得再查一遍：
+
+1. dae 的 `DEPENDS` 里有 `+kmod-xdp-sockets-diag`；
+2. `kmod-xdp-sockets-diag` 在 `package/kernel/linux/modules/netsupport.mk` 里写着
+   `DEPENDS:=@KERNEL_XDP_SOCKETS`；
+3. `scripts/package-metadata.pl` 的 `mconf_depends()` 会把每个 `+依赖` 的
+   `depends on` **重新发到本包上**（源码注释：Menuconfig 不会把 `select FOO`
+   当成真实依赖，所以要把 FOO 的 depends 也搬过来）；
+4. 于是 `PACKAGE_dae` 实际带了一条 `depends on KERNEL_XDP_SOCKETS`；
+5. 而 `config/passwall2.config` 里是 `# CONFIG_KERNEL_XDP_SOCKETS is not set`
+   （passwall 不需要 BTF，当年这么写是对的）；kconfig 的规则是**符号不可见时
+   忽略 `.config` 里的用户值**；
+6. 结果 `PACKAGE_dae` 整块不可见，`CONFIG_PACKAGE_dae=y` 被 `make defconfig`
+   **静默丢弃**，一个报错都不给——但 BTF 那几个符号全都正常保留，
+   看起来像"只有 dae 有问题"。
+
+`KERNEL_XDP_SOCKETS` 本来就是 `default y if KERNEL_DEBUG_INFO_BTF`，
+开了 BTF 就该是 y，只是被 config 里那行显式 `not set` 压住了。
+现在 `config/dae.config` 已改成 `=y`，`diy-dae.sh` 里也再写一遍（换 config 文件时也不会丢）。
+
+同症状的排查口诀：**符号在 `tmp/.config-package.in` 里存在、但值不生效 ⇒ 找它的
+`depends on` 里有没有哪个 `KERNEL_*` 是 n**。workflow 在 dae 校验失败时会自动
+打印这个符号的定义、`.config` 里的实际值，以及 `package/feeds/packages/dae` 是否存在。
 
 ### 大版本升级的已知风险
 
