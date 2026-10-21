@@ -8,18 +8,19 @@ name: immortalwrt-dae Builder
 #   2. 编译前多一步校验（dae 是否被选中、BTF 有没有真的开），编译后再验一次产物
 #
 # 手动跑：Actions -> immortalwrt-dae Builder -> Run workflow
-#         可在 dae_version 里填其它版本（例如 2.1.0），但要同时改下面 DAE_SHA256，
-#         校验值取自 https://github.com/daeuniverse/dae/releases 对应版本的
-#         dae-full-src.zip.dgst。
+#         dae_version 留空 / 填 latest ⇒ 每次编译都自动取上游最新正式版，
+#                                   版本号与 PKG_HASH 都由 .dgst 现查，不用手改；
+#         dae_version 填具体版本（如 2.1.1）⇒ 钉死该版本，用于复现同一份固件。
+#         定时 dispatch 也可以在 client_payload 里传 dae_version。
 
 on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
       dae_version:
-        description: 'dae 版本（对应 GitHub Release tag，不带 v）'
+        description: 'dae 版本：留空或 latest = 自动取最新正式版；也可写 2.1.1 之类钉死'
         required: false
-        default: '2.1.1'
+        default: 'latest'
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
@@ -28,8 +29,8 @@ env:
   CONFIG_FILE: config/passwall2.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-dae.sh
-  DAE_VERSION: ${{ github.event.inputs.dae_version || '2.1.1' }}
-  DAE_SHA256: 880d56d2f4b80c009c29693a5ec1d6a44b4958aeba6323af879787934ee0e855
+  # 只是"请求"，真正生效的 DAE_VERSION / DAE_SHA256 由下面 Resolve 步骤现查后写入
+  DAE_VERSION_REQUEST: ${{ github.event.inputs.dae_version || github.event.client_payload.dae_version || 'latest' }}
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -45,6 +46,55 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v7
+
+    # dae 的 OpenWrt 包是 PKG_VERSION + PKG_HASH 成对使用的，只改版本号必然校验失败。
+    # 这里把两件事都交给上游：版本来自 releases/latest（或手动钉死的那个 tag），
+    # 校验值直接取同一 release 里的 dae-full-src.zip.dgst，永不手抄。
+    - name: Resolve dae version and checksum
+      id: dae
+      run: |
+        set -euo pipefail
+
+        REQ="$DAE_VERSION_REQUEST"
+        case "$REQ" in
+          ""|latest|LATEST|Latest)
+            # 不用 jq：runner 上虽然有，但纯 sed 更少依赖，也方便本地复跑
+            TAG=$(curl -fsSL --retry 5 --retry-delay 3 \
+                    -H 'Accept: application/vnd.github+json' \
+                    https://api.github.com/repos/daeuniverse/dae/releases/latest \
+                  | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                  | head -n 1)
+            ;;
+          *)
+            TAG="$REQ"
+            case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+            ;;
+        esac
+
+        if [ -z "${TAG:-}" ] || [ "$TAG" = "null" ]; then
+          echo "::error::无法解析 dae 版本（请求值: ${REQ}）"
+          exit 1
+        fi
+        VER="${TAG#v}"
+
+        # .dgst 是上游 release 附带的校验清单，格式：<hash>  <文件名>  <算法>
+        DGST=$(curl -fsSL --retry 5 --retry-delay 3 \
+                 "https://github.com/daeuniverse/dae/releases/download/${TAG}/dae-full-src.zip.dgst")
+        SHA=$(printf '%s\n' "$DGST" | awk '$2=="dae-full-src.zip" && $3=="sha256"{print $1; exit}')
+        if [ "${#SHA}" -ne 64 ]; then
+          echo "::error::未能从 ${TAG} 的 dae-full-src.zip.dgst 取到 sha256"
+          printf '%s\n' "$DGST" | head -n 5
+          exit 1
+        fi
+
+        echo "dae 版本: ${VER}"
+        echo "dae 源码 sha256: ${SHA}"
+        {
+          echo "DAE_VERSION=${VER}"
+          echo "DAE_SHA256=${SHA}"
+        } >> "$GITHUB_ENV"
+        echo "version=${VER}" >> "$GITHUB_OUTPUT"
+        echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
 
     - name: Initialization environment
       env:

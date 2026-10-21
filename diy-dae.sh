@@ -3,9 +3,14 @@
 # diy-dae.sh —— dae 专用 DIY 脚本（part 2）
 # 执行时机：feeds install 之后、make defconfig 之前，当前目录 = openwrt 源码根
 #
+# 输入（由 workflow 的 "Resolve dae version and checksum" 步骤注入）：
+#   DAE_VERSION  例如 2.1.1（不含 v）
+#   DAE_SHA256   dae-full-src.zip 的 sha256，必须与该版本严格对应
+# 两者刻意不给默认值：写死默认值等于偷偷固定版本，升级时会以为改了其实没改。
+#
 # 这个脚本做三件事：
 #   1) 沿用 diy-part2.sh 的常规定制（默认 IP 改成 192.168.2.1 等）
-#   2) 把 feeds/packages/net/dae 从固件源自带的 2.0.0 顶到 DAE_VERSION（默认 2.1.1）
+#   2) 把 feeds/packages/net/dae 从固件源自带的版本顶到 DAE_VERSION
 #   3) 打开 dae 必需的 eBPF/BTF 内核选项，并选中 dae / dae-geoip / dae-geosite
 #
 # 为什么必须自己开 BTF：
@@ -21,12 +26,29 @@
 #
 set -e
 
-DAE_VER="${DAE_VERSION:-2.1.1}"
-DAE_HASH="${DAE_SHA256:-880d56d2f4b80c009c29693a5ec1d6a44b4958aeba6323af879787934ee0e855}"
+DAE_VER="${DAE_VERSION:-}"
+DAE_HASH="${DAE_SHA256:-}"
 DAE_MK="feeds/packages/net/dae/Makefile"
 WS="${GITHUB_WORKSPACE:-$(pwd)}"
 
+if [ -z "${DAE_VER}" ] || [ "${DAE_VER}" = "latest" ]; then
+    echo "::error::DAE_VERSION 未解析（当前值 '${DAE_VER}'）。应由 workflow 的 Resolve dae version 步骤注入；本地手动执行请显式传入 DAE_VERSION=x.y.z DAE_SHA256=<64 位 sha256>"
+    exit 1
+fi
+if [ "${#DAE_HASH}" -ne 64 ]; then
+    echo "::error::DAE_SHA256 不是合法的 sha256（长度 ${#DAE_HASH}），拒绝在不校验的情况下打包"
+    exit 1
+fi
+
 echo "=== [diy-dae] 目标 dae 版本: ${DAE_VER} ==="
+echo "=== [diy-dae] 源码 sha256: ${DAE_HASH} ==="
+
+case "${DAE_VER}" in
+    2.1.*) ;;
+    *)
+        echo "::warning::dae ${DAE_VER} 尚未在此配方上验证过。本 Makefile 依赖上游的 go:generate/bpf2go 接口与 example.dae 布局，大版本升级（例如 3.x 改了 eBPF 构建方式）可能需要同步调整 feeds 里的包定义，届时请对照上游 Makefile / CHANGELOGS.md。"
+        ;;
+esac
 
 # ---------------------------------------------------------------- 1) 常规定制
 if [ -f "${WS}/diy-part2.sh" ]; then
