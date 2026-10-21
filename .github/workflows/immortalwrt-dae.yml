@@ -178,6 +178,16 @@ jobs:
           grep -qx "$s" .config && echo "  OK   $s" || echo "::warning::缺少 $s，geoip/geosite 规则将无数据文件可用"
         done
 
+        # make defconfig 会静默丢掉依赖不满足的符号（feed 里没这个包、内核版本不匹配等），
+        # 所以这里把 config 里点名要的附加软件逐个回读一遍，消失就告警。
+        echo "== 附加软件（来自 config/passwall2.config） =="
+        for s in CONFIG_PACKAGE_ddns-go=y CONFIG_PACKAGE_luci-app-ddns-go=y \
+                 CONFIG_PACKAGE_kmod-wireguard=y CONFIG_PACKAGE_wireguard-tools=y \
+                 CONFIG_PACKAGE_luci-proto-wireguard=y; do
+          grep -qx "$s" .config && echo "  OK   $s" \
+            || echo "::warning::$s 在 make defconfig 后被丢弃（feed 缺包或依赖未满足），本次固件不含该项"
+        done
+
         [ "$fail" = "0" ] || exit 1
         echo "== 配置校验通过 =="
 
