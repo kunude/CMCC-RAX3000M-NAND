@@ -1,0 +1,296 @@
+name: immortalwrt-dae Builder
+
+# 在 ImmortalWrt master 上编译 RAX3000M(NAND) 固件，并把固件源自带的 dae 2.0.0
+# 顶到上游最新正式版（默认 2.1.1）。
+#
+# 与仓库里其它 4 个 workflow 的区别只有两处：
+#   1. DIY_P2_SH 换成 diy-dae.sh —— 改 dae 版本号/校验值 + 打开内核 BTF
+#   2. 编译前多一步校验（dae 是否被选中、BTF 有没有真的开），编译后再验一次产物
+#
+# 手动跑：Actions -> immortalwrt-dae Builder -> Run workflow
+#         可在 dae_version 里填其它版本（例如 2.1.0），但要同时改下面 DAE_SHA256，
+#         校验值取自 https://github.com/daeuniverse/dae/releases 对应版本的
+#         dae-full-src.zip.dgst。
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      dae_version:
+        description: 'dae 版本（对应 GitHub Release tag，不带 v）'
+        required: false
+        default: '2.1.1'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: config/passwall2.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-dae.sh
+  DAE_VERSION: ${{ github.event.inputs.dae_version || '2.1.1' }}
+  DAE_SHA256: 880d56d2f4b80c009c29693a5ec1d6a44b4958aeba6323af879787934ee0e855
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 480
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    # 编译动辄 3 小时，配置问题必须在下载/编译之前暴露出来。
+    # 这里 make defconfig 一次，逐项核对；缺项直接 ::error:: 退出。
+    - name: Resolve and verify configuration
+      run: |
+        cd openwrt
+        echo "== dae 包定义 =="
+        sed -n '/^PKG_VERSION:=/p;/^PKG_HASH:=/p;/^PKG_SOURCE_URL:=/p' feeds/packages/net/dae/Makefile
+
+        echo "== make defconfig =="
+        make defconfig
+
+        fail=0
+        check() {
+          if grep -qx "$1" .config; then
+            echo "  OK   $1"
+          else
+            echo "::error::.config 里缺少 $1（dae 会因此无法正常工作）"
+            fail=1
+          fi
+        }
+
+        echo "== 必须项 =="
+        check "CONFIG_PACKAGE_dae=y"
+        check "CONFIG_KERNEL_DEBUG_INFO=y"
+        check "CONFIG_KERNEL_DEBUG_INFO_BTF=y"
+        check "CONFIG_KERNEL_BPF_EVENTS=y"
+        check "CONFIG_DWARVES=y"
+        if grep -qx "# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set" .config; then
+          echo "  OK   CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set"
+        else
+          echo "::error::CONFIG_KERNEL_DEBUG_INFO_REDUCED 仍然是开启状态，BTF 会被依赖关系关掉"
+          fail=1
+        fi
+
+        echo "== 建议项（缺了只告警） =="
+        for s in CONFIG_PACKAGE_dae-geoip=y CONFIG_PACKAGE_dae-geosite=y; do
+          grep -qx "$s" .config && echo "  OK   $s" || echo "::warning::缺少 $s，geoip/geosite 规则将无数据文件可用"
+        done
+
+        [ "$fail" = "0" ] || exit 1
+        echo "== 配置校验通过 =="
+
+    - name: Download package
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        DEVICE_NAME="$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | sort -u | tr '\n' '_' | sed 's/_$//')"
+        [ -n "$DEVICE_NAME" ] && echo "DEVICE_NAME=_${DEVICE_NAME}" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    # 产物校验：确认编出来的确实是目标版本的 dae，且内核真的带 BTF。
+    # 这两项任一不成立，固件刷上去 dae 也是白装。
+    - name: Verify dae package and kernel BTF
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt
+        fail=0
+
+        echo "== 构建出的 dae 包 =="
+        PKG=$(find bin/packages -maxdepth 3 \( -name "dae-*.apk" -o -name "dae_*.ipk" \) | sort)
+        echo "${PKG:-（空）}"
+        if echo "$PKG" | grep -Eq "dae[-_]${DAE_VERSION}(-[0-9]+)?\.(apk|ipk)"; then
+          echo "  OK   版本 = ${DAE_VERSION}"
+          echo "DAE_PKG=$(echo "$PKG" | grep -E "dae[-_]${DAE_VERSION}(-[0-9]+)?\.(apk|ipk)" | head -n 1)" >> $GITHUB_ENV
+        else
+          echo "::error::没有找到 dae ${DAE_VERSION} 的安装包，产物版本不对"
+          fail=1
+        fi
+
+        echo "== 内核 BTF =="
+        KCFG=$(ls build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -n 1)
+        if [ -n "$KCFG" ] && grep -qx "CONFIG_DEBUG_INFO_BTF=y" "$KCFG"; then
+          echo "  OK   $KCFG 已开启 DEBUG_INFO_BTF"
+        else
+          echo "::error::内核 .config 未开启 DEBUG_INFO_BTF，dae 将无法加载 eBPF"
+          fail=1
+        fi
+
+        echo "== 固件产物 =="
+        ls -lh bin/targets/*/*/ | head -n 30
+        [ "$fail" = "0" ] || exit 1
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        mkdir -p firmware
+        cp * firmware/ 2>/dev/null || true
+        cp sha256sums firmware/ 2>/dev/null || true
+        # 把单独编出来的 dae apk 也塞进发布目录，方便只替换 dae 而不刷整机
+        if [ -n "${DAE_PKG:-}" ] && [ -f "$GITHUB_WORKSPACE/openwrt/$DAE_PKG" ]; then
+          cp "$GITHUB_WORKSPACE/openwrt/$DAE_PKG" firmware/ || true
+        fi
+        ls -lh firmware/ | head -n 20
+        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        {
+          echo "**dae ${DAE_VERSION}** · ImmortalWrt ${REPO_BRANCH}"
+          echo ""
+          echo "- 内核已开启 BTF / BPF_EVENTS（dae 的 eBPF CO-RE 依赖）"
+          echo "- 配置基线：\`${CONFIG_FILE}\`，默认管理地址 192.168.2.1"
+          echo "- /etc/dae/config.dae 与 /etc/config/dae 是 conffiles，sysupgrade 会保留原文件"
+          echo "- 单独替换 dae 可用本次构建产出的 apk：\`apk add --allow-untrusted dae-${DAE_VERSION}-r1.apk\`"
+        } >> release.txt
+        cat release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v3
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
+
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.ACTIONS_TRIGGER_PAT }}
+      with:
+        token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
+        retain_days: 0
+        keep_minimum_runs: 2
+
+    - name: Remove old Releases
+      uses: actions/github-script@v9
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.ACTIONS_TRIGGER_PAT }}
+      with:
+        github-token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
+        script: |
+          const keepLatest = 3;
+          const deleteTags = true;
+
+          const releases = await github.paginate(github.rest.repos.listReleases, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+
+          // Newest first by creation time (robust for non-semver date tags).
+          releases.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          core.info(`Total releases: ${releases.length}`);
+
+          const toDelete = releases.slice(keepLatest);
+          for (const rel of toDelete) {
+            core.info(`Deleting release '${rel.tag_name}' (created ${rel.created_at})`);
+            await github.rest.repos.deleteRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: rel.id
+            });
+            if (deleteTags && rel.tag_name) {
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${rel.tag_name}`
+                });
+                core.info(`  -> deleted tag ${rel.tag_name}`);
+              } catch (err) {
+                core.info(`  -> tag ${rel.tag_name} not deleted: ${err.message}`);
+              }
+            }
+          }
+          core.info(`Kept ${Math.min(keepLatest, releases.length)} release(s).`);
