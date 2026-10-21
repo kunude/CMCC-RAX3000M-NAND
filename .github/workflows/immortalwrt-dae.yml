@@ -1,11 +1,17 @@
 name: immortalwrt-dae Builder
 
-# 在 ImmortalWrt master 上编译 RAX3000M(NAND) 固件，并把固件源自带的 dae 2.0.0
-# 顶到上游最新正式版（默认 2.1.1）。
+# 在 ImmortalWrt master 上编译 RAX3000M(NAND) 固件，代理部分只装 dae
+# （把固件源自带的 dae 2.0.0 顶到上游最新正式版），不含 passwall / passwall2。
 #
-# 与仓库里其它 4 个 workflow 的区别只有两处：
-#   1. DIY_P2_SH 换成 diy-dae.sh —— 改 dae 版本号/校验值 + 打开内核 BTF
-#   2. 编译前多一步校验（dae 是否被选中、BTF 有没有真的开），编译后再验一次产物
+# 与仓库里其它 workflow 的区别：
+#   1. CONFIG_FILE 换成 config/dae.config —— 从 passwall2.config 派生，
+#      但把 luci-app-passwall2 及其专属组件（sing-box / chinadns-ng /
+#      dns2socks / microsocks / ipt2socks / tcping / geoview）全部关掉
+#   2. DIY_P1_SH 换成 diy-dae-part1.sh —— feeds 不做任何定制，
+#      不删 feed 里的包、也不 git clone Openwrt-Passwall 那三个仓库
+#   3. DIY_P2_SH 换成 diy-dae.sh —— 改 dae 版本号/校验值 + 打开内核 BTF
+#   4. 编译前多一步校验（dae 是否被选中、BTF 有没有真的开、passwall 有没有混进来），
+#      编译后再验一次产物
 #
 # 手动跑：Actions -> immortalwrt-dae Builder -> Run workflow
 #         dae_version 留空 / 填 latest ⇒ 每次编译都自动取上游最新正式版，
@@ -26,8 +32,8 @@ env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: config/passwall2.config
-  DIY_P1_SH: diy-part1.sh
+  CONFIG_FILE: config/dae.config
+  DIY_P1_SH: diy-dae-part1.sh
   DIY_P2_SH: diy-dae.sh
   # 只是"请求"，真正生效的 DAE_VERSION / DAE_SHA256 由下面 Resolve 步骤现查后写入
   DAE_VERSION_REQUEST: ${{ github.event.inputs.dae_version || github.event.client_payload.dae_version || 'latest' }}
@@ -180,12 +186,27 @@ jobs:
 
         # make defconfig 会静默丢掉依赖不满足的符号（feed 里没这个包、内核版本不匹配等），
         # 所以这里把 config 里点名要的附加软件逐个回读一遍，消失就告警。
-        echo "== 附加软件（来自 config/passwall2.config） =="
+        echo "== 附加软件（来自 config/dae.config） =="
         for s in CONFIG_PACKAGE_ddns-go=y CONFIG_PACKAGE_luci-app-ddns-go=y \
                  CONFIG_PACKAGE_kmod-wireguard=y CONFIG_PACKAGE_wireguard-tools=y \
                  CONFIG_PACKAGE_luci-proto-wireguard=y; do
           grep -qx "$s" .config && echo "  OK   $s" \
             || echo "::warning::$s 在 make defconfig 后被丢弃（feed 缺包或依赖未满足），本次固件不含该项"
+        done
+
+        # dae 版的定位就是「用 dae 顶替 passwall」，所以这里反向校验：
+        # 只要 passwall / passwall2 被任何依赖顺带拉进来（例如某个 i18n 包、
+        # luci-app-passwall_Nftables_Transparent_Proxy 之类），固件就被污染了。
+        echo "== 禁止项：passwall 不得出现在最终配置里 =="
+        for s in CONFIG_PACKAGE_luci-app-passwall=y CONFIG_PACKAGE_luci-app-passwall2=y \
+                 CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y \
+                 CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y; do
+          if grep -qx "$s" .config; then
+            echo "::error::$s 被重新拉入，dae 版固件不应包含 passwall"
+            fail=1
+          else
+            echo "  OK   未选中 $s"
+          fi
         done
 
         [ "$fail" = "0" ] || exit 1
@@ -286,6 +307,7 @@ jobs:
           echo ""
           echo "- 内核已开启 BTF / BPF_EVENTS（dae 的 eBPF CO-RE 依赖）"
           echo "- 配置基线：\`${CONFIG_FILE}\`，默认管理地址 192.168.2.1"
+          echo "- 代理方案只有 dae，不含 passwall / passwall2（及其 sing-box 等组件）"
           echo "- /etc/dae/config.dae 与 /etc/config/dae 是 conffiles，sysupgrade 会保留原文件"
           echo "- 单独替换 dae 可用本次构建产出的 apk：\`apk add --allow-untrusted dae-${DAE_VERSION}-r1.apk\`"
         } >> release.txt

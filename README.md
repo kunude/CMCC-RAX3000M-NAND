@@ -3,13 +3,34 @@
 ## immortalwrt-dae（含最新版 dae 的固件）
 
 `.github/workflows/immortalwrt-dae.yml`：在 ImmortalWrt master 上编译 RAX3000M(NAND) 固件，
-并把软件源自带的 dae 顶到上游最新正式版。
+代理部分**只装 dae**（把软件源自带的 dae 顶到上游最新正式版），**不含 passwall / passwall2**。
 
 - 触发：Actions → **immortalwrt-dae Builder** → Run workflow
   - `dae_version` 留空或填 `latest`：每次编译自动取上游最新正式版
   - `dae_version` 填 `2.1.1` 之类：钉死该版本，便于复现同一份固件
-- 配置基线：`config/passwall2.config`（改 `env.CONFIG_FILE` 可换成其它 config）
-- DIY 脚本：`diy-dae.sh` —— 改 dae 版本号/校验值、摘掉 `-Werror`、打开内核 BTF 与 dae 包
+- 配置基线：`config/dae.config`（改 `env.CONFIG_FILE` 可换成其它 config）
+- DIY 脚本：
+  - `diy-dae-part1.sh` —— feeds 不做任何定制，不引入 passwall（原 `diy-part1.sh` 会在
+    feeds 更新前 `git clone` 三个 Openwrt-Passwall 仓库）
+  - `diy-dae.sh` —— 改 dae 版本号/校验值、摘掉 `-Werror`、打开内核 BTF 与 dae 包
+
+### 和 passwall 版的配置差异
+
+`config/dae.config` 由 `config/passwall2.config` 派生，只做了 12 处「取消选中」，其余
+（目标设备 `mediatek/filogic` + `DEVICE_cmcc_rax3000m`、内核选项、LuCI 组件、
+ddns-go、wireguard 等）完全一致：
+
+| 关掉的符号 | 原因 |
+|---|---|
+| `luci-app-passwall2`、`luci-i18n-passwall-zh-cn` | 主体，dae 顶替 |
+| `luci-app-passwall_Nftables_Transparent_Proxy`、`..._INCLUDE_SingBox`、`..._INCLUDE_Geoview` | passwall v1 的子选项 |
+| `sing-box`、`chinadns-ng`、`dns2socks`、`microsocks`、`ipt2socks`、`tcping`、`geoview` | 只为 passwall 服务的组件 |
+
+dae 的 DNS 分流、透明代理、geoip/geosite 都由自身 eBPF + 内置 DNS 完成，不需要上面任何一个。
+想保留其中某项（例如仍想用 `sing-box` 手动跑节点），把对应行改回 `=y` 即可。
+
+workflow 里对应加了**反向校验**：`make defconfig` 之后若 `luci-app-passwall*` 又被依赖
+顺带拉进来，直接 `::error::` 失败，避免「以为没有 passwall、其实被别的包带进来了」。
 
 ### 版本与校验值是自动的
 
