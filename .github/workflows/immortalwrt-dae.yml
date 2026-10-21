@@ -261,12 +261,40 @@ jobs:
         echo "== 构建出的 dae 包 =="
         PKG=$(find bin/packages -maxdepth 3 \( -name "dae-*.apk" -o -name "dae_*.ipk" \) | sort)
         echo "${PKG:-（空）}"
-        if echo "$PKG" | grep -Eq "dae[-_]${DAE_VERSION}(-[0-9]+)?\.(apk|ipk)"; then
-          echo "  OK   版本 = ${DAE_VERSION}"
-          echo "DAE_PKG=$(echo "$PKG" | grep -E "dae[-_]${DAE_VERSION}(-[0-9]+)?\.(apk|ipk)" | head -n 1)" >> $GITHUB_ENV
+        # 文件名是 <包名>-<PKG_VERSION>-r<PKG_RELEASE>.apk，release 后缀是 -r1 这种形式，
+        # 不是 -1，所以必须写成 -r?[0-9]+，否则编出来也会被判成"没找到"。
+        # opkg 风格还会带架构后缀（dae_2.1.1-r1_aarch64_cortex-a53.ipk），一并允许。
+        # 版本号里的 . 要转义，否则 2.1.1 会当成通配。
+        VER_RE=$(printf '%s' "$DAE_VERSION" | sed 's/\./\\./g')
+        PKG_RE="(^|/)dae[-_]${VER_RE}(-r?[0-9]+)?(_[a-z0-9_]+)?\.(apk|ipk)$"
+        MAIN=$(echo "$PKG" | grep -E "$PKG_RE" | head -n 1)
+        if [ -n "$MAIN" ]; then
+          echo "  OK   版本 = ${DAE_VERSION}  ->  ${MAIN}"
+          echo "DAE_PKG=${MAIN}" >> $GITHUB_ENV
         else
           echo "::error::没有找到 dae ${DAE_VERSION} 的安装包，产物版本不对"
+          echo "  期望匹配：${PKG_RE}"
+          echo "  实际找到的 dae 包："
+          echo "${PKG:-（空）}" | sed 's/^/    /' | head -n 20
           fail=1
+        fi
+
+        # 包编出来 ≠ 进了固件。manifest 是镜像内实际装了什么的最直接证据。
+        # 格式随 apk/opkg 不同，用三种写法都认的模式（dae - x / dae x / dae-x），
+        # 但要求 dae 后面紧跟空格、冒号或「-数字」，避免把 dae-geoip 当成 dae。
+        echo "== 镜像 manifest 里的 dae =="
+        MANIFEST=$(ls bin/targets/*/*/*.manifest 2>/dev/null | head -n 1)
+        MAN_RE="^dae[[:space:]]|^dae:|^dae[-_][0-9]"
+        if [ -n "$MANIFEST" ]; then
+          grep -E "^dae" "$MANIFEST" | sed 's/^/  /' || true
+          if grep -qE "$MAN_RE" "$MANIFEST"; then
+            echo "  OK   dae 已进入固件（${MANIFEST}）"
+          else
+            echo "::error::${MANIFEST} 里没有 dae，包编出来了但没被装进镜像"
+            fail=1
+          fi
+        else
+          echo "::warning::找不到 *.manifest，跳过「dae 是否进镜像」的检查"
         fi
 
         echo "== 内核 BTF =="
@@ -301,10 +329,14 @@ jobs:
         mkdir -p firmware
         cp * firmware/ 2>/dev/null || true
         cp sha256sums firmware/ 2>/dev/null || true
-        # 把单独编出来的 dae apk 也塞进发布目录，方便只替换 dae 而不刷整机
-        if [ -n "${DAE_PKG:-}" ] && [ -f "$GITHUB_WORKSPACE/openwrt/$DAE_PKG" ]; then
-          cp "$GITHUB_WORKSPACE/openwrt/$DAE_PKG" firmware/ || true
-        fi
+        # 把单独编出来的 dae 包也塞进发布目录，方便只替换 dae 而不刷整机。
+        # 这里不依赖上一步算出的 DAE_PKG：那一步一旦判错，附件就会静默缺失
+        # （曾经因为正则漏掉 -r1 后缀，整包固件发出来了但 apk 没跟上）。
+        find "$GITHUB_WORKSPACE/openwrt/bin/packages" -maxdepth 3 \
+             \( -name "dae-*.apk" -o -name "dae_*.ipk" \) \
+             -exec cp {} firmware/ \; 2>/dev/null || true
+        echo "-- 已一并放入的 dae 包 --"
+        ls firmware/ | grep -E "^dae" || echo "  （没有找到 dae 包）"
         ls -lh firmware/ | head -n 20
         echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
