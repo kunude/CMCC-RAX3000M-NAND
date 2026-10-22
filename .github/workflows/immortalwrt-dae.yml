@@ -161,7 +161,7 @@ jobs:
           if grep -qx "$1" .config; then
             echo "  OK   $1"
           else
-            echo "::error::.config 里缺少 $1（dae 会因此无法正常工作）"
+            echo "::error::.config 里缺少 $1"
             fail=1
           fi
         }
@@ -176,6 +176,11 @@ jobs:
         # 这个 depends 会被 metadata.pl 搬到 PACKAGE_dae 上；它为 n 时
         # PACKAGE_dae 直接隐形，.config 里的 =y 会被 defconfig 静默丢弃。
         check "CONFIG_KERNEL_XDP_SOCKETS=y"
+        # LuCI 面板与中文语言包。feeds 里有 luci-app-dae，但默认不选，
+        # 漏了它固件照常能编、dae 也能跑，只是网页上没有入口，很难发现。
+        check "CONFIG_PACKAGE_luci-app-dae=y"
+        check "CONFIG_PACKAGE_luci-i18n-dae-zh-cn=y"
+        check "CONFIG_LUCI_LANG_zh_Hans=y"
         if grep -qx "# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set" .config; then
           echo "  OK   CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set"
         else
@@ -193,6 +198,24 @@ jobs:
           echo "-- tmp/.config-package.in 里的 PACKAGE_dae 定义 --"
           if [ -f tmp/.config-package.in ]; then
             grep -n -A 16 "^config PACKAGE_dae$" tmp/.config-package.in || echo "(没找到该符号)"
+          else
+            echo "(tmp/.config-package.in 不存在)"
+          fi
+          echo "::endgroup::"
+        fi
+
+        # LuCI 面板缺失有两种典型原因：feeds 里没有这个应用（feed 未安装），
+        # 或者 LUCI_LANG_zh_Hans 没开导致 i18n 包不生成。分别打出来。
+        if ! grep -qx "CONFIG_PACKAGE_luci-app-dae=y" .config; then
+          echo "::group::luci-app-dae 符号诊断"
+          echo "-- 实际值 --"
+          grep -nE "^#? ?CONFIG_(PACKAGE_luci-app-dae|PACKAGE_luci-i18n-dae-zh-cn|LUCI_LANG_zh_Hans)" .config || true
+          echo "-- package/feeds/luci/luci-app-dae 是否存在 --"
+          ls -ld package/feeds/luci/luci-app-dae 2>&1 || true
+          echo "-- tmp/.config-package.in 里的 PACKAGE_luci-app-dae 定义 --"
+          if [ -f tmp/.config-package.in ]; then
+            grep -n -A 12 "^config PACKAGE_luci-app-dae$" tmp/.config-package.in \
+              || echo "(没找到该符号：feeds 里没有该应用，检查 feeds.conf.default 是否含 luci feed)"
           else
             echo "(tmp/.config-package.in 不存在)"
           fi
@@ -293,6 +316,19 @@ jobs:
             echo "::error::${MANIFEST} 里没有 dae，包编出来了但没被装进镜像"
             fail=1
           fi
+
+          # LuCI 面板 + 中文语言包。这两项缺了不影响 dae 运行，但网页上没有入口，
+          # 属于「编成功了却不好用」的典型，必须在 CI 里卡住。
+          echo "== 镜像 manifest 里的 dae LuCI =="
+          for p in luci-app-dae luci-i18n-dae-zh-cn; do
+            if grep -qE "^${p}[[:space:]]" "$MANIFEST"; then
+              grep -E "^${p}[[:space:]]" "$MANIFEST" | sed 's/^/  /'
+              echo "  OK   $p"
+            else
+              echo "::error::${MANIFEST} 里没有 ${p}，网页上不会有 dae 入口"
+              fail=1
+            fi
+          done
         else
           echo "::warning::找不到 *.manifest，跳过「dae 是否进镜像」的检查"
         fi

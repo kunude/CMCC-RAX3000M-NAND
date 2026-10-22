@@ -12,11 +12,13 @@
 - DIY 脚本：
   - `diy-dae-part1.sh` —— feeds 不做任何定制，不引入 passwall（原 `diy-part1.sh` 会在
     feeds 更新前 `git clone` 三个 Openwrt-Passwall 仓库）
-  - `diy-dae.sh` —— 改 dae 版本号/校验值、摘掉 `-Werror`、打开内核 BTF 与 dae 包
+  - `diy-dae.sh` —— 改 dae 版本号/校验值、摘掉 `-Werror`、打开内核 BTF，
+    并选中 dae / dae-geoip / dae-geosite 与 **LuCI 面板 `luci-app-dae` + 中文语言包**
 
 ### 和 passwall 版的配置差异
 
-`config/dae.config` 由 `config/passwall2.config` 派生，只做了 12 处「取消选中」，其余
+`config/dae.config` 由 `config/passwall2.config` 派生，做了 12 处「取消选中」，
+另加 2 处「选中」（`luci-app-dae`、`luci-i18n-dae-zh-cn`），其余
 （目标设备 `mediatek/filogic` + `DEVICE_cmcc_rax3000m`、内核选项、LuCI 组件、
 ddns-go、wireguard 等）完全一致：
 
@@ -64,10 +66,42 @@ CONFIG_PACKAGE_kmod-sched-core=y
 CONFIG_PACKAGE_kmod-sched-bpf=y
 CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
 CONFIG_PACKAGE_kmod-veth=y
+CONFIG_PACKAGE_luci-app-dae=y                   ← 网页面板，见下节
+CONFIG_PACKAGE_luci-i18n-dae-zh-cn=y
+CONFIG_LUCI_LANG_zh_Hans=y
 ```
 
-workflow 在 `make defconfig` 之后会逐项核对上面这些符号，缺一项就以 `::error::` 失败，
-不会白跑三个小时的编译。
+workflow 在 `make defconfig` 之后会逐项核对上面这些符号（含 LuCI 面板与中文语言包），
+缺一项就以 `::error::` 失败，不会白跑三个小时的编译；编译完成后还会从
+`bin/targets/*/*/*.manifest`（镜像内实际安装清单）确认 `dae`、`luci-app-dae`、
+`luci-i18n-dae-zh-cn` 真的进了镜像——**包编出来不等于装进固件**。
+
+### LuCI 面板（服务 → dae）
+
+`luci-app-dae` 在 feeds（`immortalwrt/luci` → `applications/luci-app-dae`）里是存在的，
+但**默认不选**——不选的话 dae 只能靠 SSH 改 UCI，网页上什么都看不到。它没有 `HIDDEN` 标记，
+`LUCI_DEPENDS:=+dae +dae-geoip +dae-geosite`，只要 dae 那几个包能选中，它自己不会被依赖卡住；
+但它不在 `.config` 里，`defconfig` 也不会替你补上，必须显式写。
+
+菜单位置 **服务 → dae**，三页：
+
+| 页面 | 作用 |
+|---|---|
+| Settings | 启用开关、配置文件路径、日志轮转（写 `/etc/config/dae`） |
+| Configuration | 直接编辑 `/etc/dae/config.dae`（保存时按 0600 写入） |
+| Log | 查看 `/var/log/dae/dae.log` |
+
+面板用到的 UCI 键与 `net/dae` 的 init 脚本完全对得上：`form.NamedSection, 'config', 'dae'`
++ `enabled` / `config_file` / `log_maxbackups` / `log_maxsize`；`hot_reload` 走
+`dae reload /var/run/dae.pid`。对照 dae 2.1.1 源码，`--config`、`--logfile`、
+`--logfile-maxsize`、`--logfile-maxbackups`、`--disable-timestamp` 与 pid 文件路径
+（`/var/run/dae.pid`）全部照旧，所以面板和任意 2.x 版本都兼容。
+
+**首次刷机后的一个坑**：`/etc/dae/config.dae` 不是包提供的文件（包里只装 `example.dae`），
+而 UCI 默认 `enabled '0'`。正确顺序是先进 **服务 → dae → 配置**——页面读不到
+`config.dae` 时会自动用 `example.dae` 兜底显示——把 `lan_interface` 改成 `br-lan`、
+按需加订阅和分组，**保存**之后再回 Settings 打开启用。直接启用而不先保存，
+会因为 `validate -c /etc/dae/config.dae` 找不到文件而启动失败。
 
 ### 为什么 `.config` 里明明写了 `dae=y`，defconfig 之后却没了
 

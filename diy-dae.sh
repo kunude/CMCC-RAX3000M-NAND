@@ -8,10 +8,17 @@
 #   DAE_SHA256   dae-full-src.zip 的 sha256，必须与该版本严格对应
 # 两者刻意不给默认值：写死默认值等于偷偷固定版本，升级时会以为改了其实没改。
 #
-# 这个脚本做三件事：
+# 这个脚本做四件事：
 #   1) 沿用 diy-part2.sh 的常规定制（默认 IP 改成 192.168.2.1 等）
 #   2) 把 feeds/packages/net/dae 从固件源自带的版本顶到 DAE_VERSION
 #   3) 打开 dae 必需的 eBPF/BTF 内核选项，并选中 dae / dae-geoip / dae-geosite
+#   4) 选中 LuCI 面板 luci-app-dae 与简体中文语言包
+#
+# 关于第 4 项：luci-app-dae 在 feeds（immortalwrt/luci → applications/luci-app-dae）
+# 里是存在的，只是**默认不选**。它不选的话，dae 只能靠 SSH 改 /etc/config/dae，
+# 网页上什么都看不到。它的 LUCI_DEPENDS 是 `+dae +dae-geoip +dae-geosite`，
+# 所以只要 dae 那几个包能选中，它本身不会被依赖卡住；但它自己不在 .config 里，
+# defconfig 也不会替你加上，必须显式写。
 #
 # 为什么必须自己开 BTF：
 #   dae 用 eBPF + CO-RE，运行时必须有 /sys/kernel/btf/vmlinux。
@@ -127,6 +134,11 @@ CONFIG_PACKAGE_kmod-sched-core=y
 CONFIG_PACKAGE_kmod-sched-bpf=y
 CONFIG_PACKAGE_kmod-xdp-sockets-diag=y
 CONFIG_PACKAGE_kmod-veth=y
+# LuCI 面板 + 简体中文语言包。feeds 里有 luci-app-dae，但默认不选，
+# 不显式写的话网页上没有 dae 入口。
+CONFIG_PACKAGE_luci-app-dae=y
+CONFIG_PACKAGE_luci-i18n-dae-zh-cn=y
+CONFIG_LUCI_LANG_zh_Hans=y
 # ===== 注入结束 =====
 EOF
 
